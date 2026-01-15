@@ -2,7 +2,7 @@
 AI Knowledge Assistant - Main Application
 Built by Eric Bolander
 
-Day 4: Full backend integration with document upload and RAG
+Day 5: Improved RAG chain with better memory and relevance scoring
 """
 
 import os
@@ -13,14 +13,10 @@ from pydantic import BaseModel
 from typing import List, Optional
 from dotenv import load_dotenv
 
-# LangChain imports
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-
 # Our custom modules
 from app.document import DocumentProcessor
 from app.embeddings import EmbeddingsManager
+from app.retrieval import get_rag_chain
 from app.config import settings
 
 load_dotenv()
@@ -41,17 +37,8 @@ app.add_middleware(
 )
 
 # Initialize components
-llm = ChatOpenAI(
-    model="gpt-4o",
-    temperature=0.7,
-    api_key=os.getenv("OPENAI_API_KEY")
-)
-
 document_processor = DocumentProcessor()
-embeddings_manager = None  # Lazy initialization
-
-# In-memory chat history
-chat_history = []
+embeddings_manager = None
 
 # Upload directory
 UPLOAD_DIR = "uploads"
@@ -70,16 +57,19 @@ def get_embeddings_manager():
 
 class ChatRequest(BaseModel):
     message: str
-    use_rag: bool = True  # Whether to search documents
+    use_rag: bool = True
 
 class ChatResponse(BaseModel):
     answer: str
     sources: Optional[List[dict]] = None
+    used_rag: bool = False
+    documents_searched: int = 0
 
 class HealthResponse(BaseModel):
     status: str
     message: str
     index_stats: Optional[dict] = None
+    memory_stats: Optional[dict] = None
 
 class UploadResponse(BaseModel):
     filename: str
@@ -92,33 +82,35 @@ class UploadResponse(BaseModel):
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint with index stats."""
+    """Health check endpoint with index and memory stats."""
     try:
         manager = get_embeddings_manager()
         stats = manager.get_index_stats()
+        
+        rag_chain = get_rag_chain()
+        memory_stats = rag_chain.get_memory_summary()
+        
         return HealthResponse(
             status="healthy",
             message="AI Knowledge Assistant is running",
             index_stats={
                 "total_vectors": stats.total_vector_count,
                 "index_name": settings.PINECONE_INDEX_NAME
-            }
+            },
+            memory_stats=memory_stats
         )
     except Exception as e:
         return HealthResponse(
             status="healthy",
-            message=f"Running (Pinecone connection issue: {str(e)})",
-            index_stats=None
+            message=f"Running (connection issue: {str(e)})",
+            index_stats=None,
+            memory_stats=None
         )
 
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_document(file: UploadFile = File(...)):
-    """
-    Upload a document, process it, and store embeddings in Pinecone.
-    Supports PDF and TXT files.
-    """
-    # Validate file type
+    """Upload a document, process it, and store embeddings."""
     file_ext = os.path.splitext(file.filename)[1].lower()
     if file_ext not in settings.ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -126,7 +118,6 @@ async def upload_document(file: UploadFile = File(...)):
             detail=f"File type {file_ext} not supported. Allowed: {settings.ALLOWED_EXTENSIONS}"
         )
     
-    # Save uploaded file
     file_path = os.path.join(UPLOAD_DIR, file.filename)
     try:
         with open(file_path, "wb") as buffer:
@@ -134,15 +125,12 @@ async def upload_document(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
     
-    # Process document into chunks
     try:
         chunks = document_processor.process_document(file_path)
     except Exception as e:
-        # Clean up file if processing fails
         os.remove(file_path)
         raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
     
-    # Store embeddings in Pinecone
     try:
         manager = get_embeddings_manager()
         manager.add_documents(chunks)
@@ -159,80 +147,19 @@ async def upload_document(file: UploadFile = File(...)):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """
-    Chat with the AI assistant.
-    If use_rag=True, searches documents for relevant context.
-    """
+    """Chat with the AI assistant using improved RAG chain."""
     try:
-        context = ""
-        sources = []
-        
-        # RAG: Search for relevant documents
-        if request.use_rag:
-            try:
-                manager = get_embeddings_manager()
-                results = manager.similarity_search(request.message, k=4)
-                
-                if results:
-                    # Build context from retrieved documents
-                    context_parts = []
-                    for i, doc in enumerate(results):
-                        source_info = {
-                            "source": doc.metadata.get("source", "Unknown"),
-                            "page": doc.metadata.get("page", 0) + 1,
-                            "chunk_index": doc.metadata.get("chunk_index", 0),
-                            "snippet": doc.page_content[:200] + "..."
-                        }
-                        sources.append(source_info)
-                        context_parts.append(f"[Source {i+1}: {source_info['source']}, Page {source_info['page']}]\n{doc.page_content}")
-                    
-                    context = "\n\n".join(context_parts)
-            except Exception as e:
-                print(f"RAG search failed: {e}")
-                # Continue without RAG if it fails
-        
-        # Build the prompt
-        if context:
-            system_message = """You are a helpful AI assistant with access to the user's documents.
-            
-Use the following context from the user's documents to answer their question.
-Always cite your sources by mentioning which document and page the information came from.
-If the context doesn't contain relevant information, say so and answer based on your general knowledge.
-
-CONTEXT FROM DOCUMENTS:
-{context}
-"""
-            system_content = system_message.format(context=context)
-        else:
-            system_content = """You are a helpful AI assistant.
-You help users understand documents and answer questions.
-Be concise but thorough in your responses."""
-        
-        prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(content=system_content),
-            MessagesPlaceholder(variable_name="history"),
-            HumanMessage(content="{input}")
-        ])
-        
-        # Create chain and get response
-        chain = prompt | llm
-        response = chain.invoke({
-            "history": chat_history,
-            "input": request.message
-        })
-        
-        # Update chat history
-        chat_history.append(HumanMessage(content=request.message))
-        chat_history.append(AIMessage(content=response.content))
-        
-        # Keep history manageable
-        if len(chat_history) > 20:
-            chat_history.pop(0)
-            chat_history.pop(0)
+        rag_chain = get_rag_chain()
+        result = rag_chain.query(
+            question=request.message,
+            use_rag=request.use_rag
+        )
         
         return ChatResponse(
-            answer=response.content,
-            sources=sources if sources else None
+            answer=result["answer"],
+            sources=result["sources"],
+            used_rag=result["used_rag"],
+            documents_searched=result["documents_searched"]
         )
         
     except Exception as e:
@@ -241,10 +168,10 @@ Be concise but thorough in your responses."""
 
 @app.post("/clear-history")
 async def clear_history():
-    """Clear the chat history."""
-    global chat_history
-    chat_history = []
-    return {"status": "cleared", "message": "Chat history cleared"}
+    """Clear the conversation history."""
+    rag_chain = get_rag_chain()
+    rag_chain.clear_memory()
+    return {"status": "cleared", "message": "Conversation history cleared"}
 
 
 @app.get("/documents")
@@ -263,7 +190,7 @@ async def list_documents():
 
 @app.delete("/documents/{filename}")
 async def delete_document(filename: str):
-    """Delete a document (note: vectors remain in Pinecone)."""
+    """Delete a document."""
     file_path = os.path.join(UPLOAD_DIR, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
