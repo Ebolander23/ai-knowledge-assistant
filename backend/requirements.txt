@@ -1,0 +1,29 @@
+# Core Framework
+fastapi
+uvicorn[standard]
+python-dotenv
+pydantic
+
+# LangChain Core
+langchain
+langchain-core
+langchain-community
+langchain-openai
+
+# Vector Database - Pinecone 
+pinecone-client
+langchain-pinecone
+
+# Document Processing 
+pypdf
+python-docx
+
+# Embeddings
+tiktoken
+
+# Web Search Tool - for agents 
+tavily-python
+
+# File Handling
+python-multipart
+aiofiles
