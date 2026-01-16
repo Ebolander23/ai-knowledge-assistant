@@ -1,6 +1,6 @@
 """
 Retrieval Module
-Handles RAG chain with improved memory and relevance scoring.
+Handles RAG chain with improved memory, relevance scoring, and citations.
 """
 
 import os
@@ -14,59 +14,53 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 
 from app.embeddings import EmbeddingsManager
+from app.citations import CitationManager
 from app.config import settings
 
 load_dotenv()
 
 
 class ConversationMemory:
-    """Manages conversation history with summarization for long conversations."""
+    """Manages conversation history."""
     
     def __init__(self, max_messages: int = 10):
         self.messages: List = []
         self.max_messages = max_messages
     
     def add_user_message(self, content: str):
-        """Add a user message to history."""
         self.messages.append(HumanMessage(content=content))
         self._trim_if_needed()
     
     def add_ai_message(self, content: str):
-        """Add an AI message to history."""
         self.messages.append(AIMessage(content=content))
         self._trim_if_needed()
     
     def _trim_if_needed(self):
-        """Keep only recent messages to manage context window."""
         if len(self.messages) > self.max_messages * 2:
-            # Keep the most recent messages
             self.messages = self.messages[-(self.max_messages * 2):]
     
     def get_messages(self) -> List:
-        """Get all messages in history."""
         return self.messages
     
     def clear(self):
-        """Clear all messages."""
         self.messages = []
     
     def get_context_string(self) -> str:
-        """Get conversation as a formatted string for context."""
         if not self.messages:
-            return ""
+            return "No previous conversation."
         
         context_parts = []
-        for msg in self.messages[-6:]:  # Last 3 exchanges
+        for msg in self.messages[-6:]:
             role = "User" if isinstance(msg, HumanMessage) else "Assistant"
-            context_parts.append(f"{role}: {msg.content}")
+            # Truncate long messages in context
+            content = msg.content[:300] + "..." if len(msg.content) > 300 else msg.content
+            context_parts.append(f"{role}: {content}")
         
         return "\n".join(context_parts)
 
 
 class RAGChain:
-    """
-    Retrieval-Augmented Generation chain with improved features.
-    """
+    """RAG chain with citations and improved prompts."""
     
     def __init__(self):
         self.llm = ChatOpenAI(
@@ -76,100 +70,62 @@ class RAGChain:
         )
         self.embeddings_manager = None
         self.memory = ConversationMemory(max_messages=10)
-        
-        # Relevance threshold (0-1, higher = more strict)
-        self.relevance_threshold = 0.3
+        self.citation_manager = CitationManager()
+        self.min_relevance = 0.15
     
     def _get_embeddings_manager(self) -> EmbeddingsManager:
-        """Lazy initialization of embeddings manager."""
         if self.embeddings_manager is None:
             self.embeddings_manager = EmbeddingsManager()
         return self.embeddings_manager
     
-    def retrieve_with_scores(
+    def retrieve_documents(
         self,
         query: str,
         k: int = 4
     ) -> List[Tuple[Document, float]]:
-        """
-        Retrieve documents with relevance scores.
-        Filters out low-relevance results.
-        """
+        """Retrieve relevant documents with scores."""
         manager = self._get_embeddings_manager()
         results = manager.similarity_search_with_score(query, k=k)
         
-        # Filter by relevance threshold
-        # Note: Pinecone returns distance, lower = more similar
-        # We convert to similarity score (1 - distance) for cosine
-        filtered_results = []
-        for doc, score in results:
-            # For cosine similarity in Pinecone, score is already similarity (higher = better)
-            if score >= 0.15:
-                filtered_results.append((doc, score))
-        
-        return filtered_results
+        # Filter by minimum relevance
+        filtered = [(doc, score) for doc, score in results if score >= self.min_relevance]
+        return filtered
     
-    def _build_context(
-        self,
-        retrieved_docs: List[Tuple[Document, float]]
-    ) -> Tuple[str, List[dict]]:
-        """
-        Build context string and sources from retrieved documents.
-        """
-        if not retrieved_docs:
-            return "", []
-        
-        context_parts = []
-        sources = []
-        
-        for i, (doc, score) in enumerate(retrieved_docs):
-            source_info = {
-                "source": doc.metadata.get("source", "Unknown"),
-                "page": doc.metadata.get("page", 0) + 1,
-                "chunk_index": doc.metadata.get("chunk_index", 0),
-                "relevance_score": round(score, 3),
-                "snippet": doc.page_content[:200] + "..."
-            }
-            sources.append(source_info)
-            
-            context_parts.append(
-                f"[Document {i+1}: {source_info['source']}, "
-                f"Page {source_info['page']}, "
-                f"Relevance: {source_info['relevance_score']:.0%}]\n"
-                f"{doc.page_content}"
-            )
-        
-        context = "\n\n---\n\n".join(context_parts)
-        return context, sources
-    
-    def _get_system_prompt(self, context: str, has_context: bool) -> str:
-        """Generate appropriate system prompt based on context availability."""
+    def _get_system_prompt(self, has_context: bool) -> str:
+        """Generate system prompt based on context availability."""
         
         if has_context:
+            context = self.citation_manager.build_context_with_citations()
+            citation_instruction = self.citation_manager.build_citation_instruction()
+            conversation_context = self.memory.get_context_string()
+            
             return f"""You are a helpful AI Knowledge Assistant with access to the user's documents.
 
 INSTRUCTIONS:
-1. Use the document context below to answer the user's question accurately.
-2. Always cite your sources by mentioning the document name and page number.
-3. If the context partially answers the question, provide what you can and note what's missing.
-4. If the context doesn't contain relevant information, clearly state that the documents don't contain this information, then offer to help based on your general knowledge.
+1. Answer the user's question using the document sources provided below.
+2. Always cite your sources! Use [Source X] format when referencing information.
+3. If multiple sources support a point, cite all relevant ones.
+4. If the sources don't fully answer the question, say what you found and what's missing.
 5. Be conversational and helpful, not robotic.
-6. Consider the conversation history for context on follow-up questions.
+6. For follow-up questions, use conversation history for context.
 
-DOCUMENT CONTEXT:
+{citation_instruction}
+
+DOCUMENT SOURCES:
 {context}
 
-CONVERSATION HISTORY:
-{self.memory.get_context_string()}
+RECENT CONVERSATION:
+{conversation_context}
 """
         else:
             return """You are a helpful AI Knowledge Assistant.
 
-The user's document library doesn't contain information relevant to this question.
-You can:
-1. Let them know the documents don't cover this topic
-2. Offer to answer based on your general knowledge
-3. Suggest what types of documents might help
+The user's documents don't contain information relevant to this question.
+
+You should:
+1. Let them know you searched but didn't find relevant information in their documents
+2. Offer to answer based on your general knowledge if appropriate
+3. Suggest what types of documents might help answer their question
 
 Be helpful and conversational."""
     
@@ -179,29 +135,25 @@ Be helpful and conversational."""
         use_rag: bool = True,
         k: int = 4
     ) -> dict:
-        """
-        Process a query through the RAG chain.
+        """Process a query through the RAG chain."""
         
-        Returns:
-            dict with 'answer', 'sources', and 'used_rag' keys
-        """
-        context = ""
-        sources = []
-        used_rag = False
+        # Reset citation manager for new query
+        self.citation_manager.clear()
         
-        # Step 1: Retrieve relevant documents
+        has_relevant_context = False
+        
+        # Step 1: Retrieve documents if RAG enabled
         if use_rag:
             try:
-                retrieved = self.retrieve_with_scores(question, k=k)
-                if retrieved:
-                    context, sources = self._build_context(retrieved)
-                    used_rag = True
+                results = self.retrieve_documents(question, k=k)
+                if results:
+                    self.citation_manager.create_citations_from_results(results)
+                    has_relevant_context = len(self.citation_manager.citations) > 0
             except Exception as e:
                 print(f"Retrieval error: {e}")
-                # Continue without RAG
         
-        # Step 2: Build prompt
-        system_prompt = self._get_system_prompt(context, bool(context))
+        # Step 2: Build prompt with appropriate context
+        system_prompt = self._get_system_prompt(has_relevant_context)
         
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content=system_prompt),
@@ -221,11 +173,16 @@ Be helpful and conversational."""
         self.memory.add_user_message(question)
         self.memory.add_ai_message(response)
         
+        # Step 5: Build result
+        citation_summary = self.citation_manager.get_citations_summary()
+        
         return {
             "answer": response,
-            "sources": sources if sources else None,
-            "used_rag": used_rag,
-            "documents_searched": len(sources)
+            "sources": self.citation_manager.format_sources_for_response(),
+            "used_rag": has_relevant_context,
+            "documents_searched": citation_summary["total_sources"],
+            "unique_documents": citation_summary.get("unique_documents", 0),
+            "average_relevance": citation_summary.get("average_relevance", 0)
         }
     
     def clear_memory(self):
@@ -240,7 +197,7 @@ Be helpful and conversational."""
         }
 
 
-# Singleton instance for the app
+# Singleton instance
 _rag_chain_instance = None
 
 def get_rag_chain() -> RAGChain:

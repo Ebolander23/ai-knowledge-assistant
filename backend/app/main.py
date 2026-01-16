@@ -64,6 +64,8 @@ class ChatResponse(BaseModel):
     sources: Optional[List[dict]] = None
     used_rag: bool = False
     documents_searched: int = 0
+    unique_documents: int = 0
+    average_relevance: float = 0.0
 
 class HealthResponse(BaseModel):
     status: str
@@ -159,7 +161,9 @@ async def chat(request: ChatRequest):
             answer=result["answer"],
             sources=result["sources"],
             used_rag=result["used_rag"],
-            documents_searched=result["documents_searched"]
+            documents_searched=result["documents_searched"],
+            unique_documents=result.get("unique_documents", 0),
+            average_relevance=result.get("average_relevance", 0.0)
         )
         
     except Exception as e:
