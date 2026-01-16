@@ -2,7 +2,7 @@
 AI Knowledge Assistant - Main Application
 Built by Eric Bolander
 
-Day 5: Improved RAG chain with better memory and relevance scoring
+Day 7: Added tool-using agents (web search, calculator)
 """
 
 import os
@@ -13,10 +13,9 @@ from pydantic import BaseModel
 from typing import List, Optional
 from dotenv import load_dotenv
 
-# Our custom modules
 from app.document import DocumentProcessor
 from app.embeddings import EmbeddingsManager
-from app.retrieval import get_rag_chain
+from app.agents import get_agent
 from app.config import settings
 
 load_dotenv()
@@ -27,7 +26,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,17 +34,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize components
 document_processor = DocumentProcessor()
 embeddings_manager = None
 
-# Upload directory
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 def get_embeddings_manager():
-    """Lazy initialization of embeddings manager."""
     global embeddings_manager
     if embeddings_manager is None:
         embeddings_manager = EmbeddingsManager()
@@ -57,21 +52,26 @@ def get_embeddings_manager():
 
 class ChatRequest(BaseModel):
     message: str
-    use_rag: bool = True
+
+class WebSource(BaseModel):
+    id: int
+    title: str
+    url: str
+    snippet: str
 
 class ChatResponse(BaseModel):
     answer: str
+    tool_used: str
     sources: Optional[List[dict]] = None
+    web_sources: Optional[List[dict]] = None
     used_rag: bool = False
     documents_searched: int = 0
-    unique_documents: int = 0
-    average_relevance: float = 0.0
 
 class HealthResponse(BaseModel):
     status: str
     message: str
     index_stats: Optional[dict] = None
-    memory_stats: Optional[dict] = None
+    agent_status: Optional[dict] = None
 
 class UploadResponse(BaseModel):
     filename: str
@@ -84,13 +84,12 @@ class UploadResponse(BaseModel):
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint with index and memory stats."""
+    """Health check with index and agent stats."""
     try:
         manager = get_embeddings_manager()
         stats = manager.get_index_stats()
-        
-        rag_chain = get_rag_chain()
-        memory_stats = rag_chain.get_memory_summary()
+        agent = get_agent()
+        agent_status = agent.get_status()
         
         return HealthResponse(
             status="healthy",
@@ -99,20 +98,20 @@ async def health_check():
                 "total_vectors": stats.total_vector_count,
                 "index_name": settings.PINECONE_INDEX_NAME
             },
-            memory_stats=memory_stats
+            agent_status=agent_status
         )
     except Exception as e:
         return HealthResponse(
             status="healthy",
-            message=f"Running (connection issue: {str(e)})",
+            message=f"Running (issue: {str(e)})",
             index_stats=None,
-            memory_stats=None
+            agent_status=None
         )
 
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_document(file: UploadFile = File(...)):
-    """Upload a document, process it, and store embeddings."""
+    """Upload and process a document."""
     file_ext = os.path.splitext(file.filename)[1].lower()
     if file_ext not in settings.ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -131,39 +130,36 @@ async def upload_document(file: UploadFile = File(...)):
         chunks = document_processor.process_document(file_path)
     except Exception as e:
         os.remove(file_path)
-        raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process: {str(e)}")
     
     try:
         manager = get_embeddings_manager()
         manager.add_documents(chunks)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to store embeddings: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to store: {str(e)}")
     
     return UploadResponse(
         filename=file.filename,
         status="success",
         chunks_created=len(chunks),
-        message=f"Document processed and stored. Created {len(chunks)} searchable chunks."
+        message=f"Document processed. Created {len(chunks)} searchable chunks."
     )
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """Chat with the AI assistant using improved RAG chain."""
+    """Chat with the AI agent. Automatically uses appropriate tools."""
     try:
-        rag_chain = get_rag_chain()
-        result = rag_chain.query(
-            question=request.message,
-            use_rag=request.use_rag
-        )
+        agent = get_agent()
+        result = agent.run(request.message)
         
         return ChatResponse(
             answer=result["answer"],
-            sources=result["sources"],
-            used_rag=result["used_rag"],
-            documents_searched=result["documents_searched"],
-            unique_documents=result.get("unique_documents", 0),
-            average_relevance=result.get("average_relevance", 0.0)
+            tool_used=result["tool_used"],
+            sources=result.get("sources"),
+            web_sources=result.get("web_sources"),
+            used_rag=result.get("used_rag", False),
+            documents_searched=result.get("documents_searched", 0)
         )
         
     except Exception as e:
@@ -172,15 +168,15 @@ async def chat(request: ChatRequest):
 
 @app.post("/clear-history")
 async def clear_history():
-    """Clear the conversation history."""
-    rag_chain = get_rag_chain()
-    rag_chain.clear_memory()
+    """Clear conversation history."""
+    agent = get_agent()
+    agent.clear_history()
     return {"status": "cleared", "message": "Conversation history cleared"}
 
 
 @app.get("/documents")
 async def list_documents():
-    """List all uploaded documents."""
+    """List uploaded documents."""
     files = []
     for filename in os.listdir(UPLOAD_DIR):
         file_path = os.path.join(UPLOAD_DIR, filename)
@@ -200,20 +196,16 @@ async def delete_document(filename: str):
         raise HTTPException(status_code=404, detail="File not found")
     
     os.remove(file_path)
-    return {
-        "status": "deleted",
-        "filename": filename,
-        "note": "File deleted. Vector embeddings remain in Pinecone."
-    }
+    return {"status": "deleted", "filename": filename}
 
 
 @app.post("/index/clear")
 async def clear_index():
-    """Clear all vectors from Pinecone index."""
+    """Clear all vectors from Pinecone."""
     try:
         manager = get_embeddings_manager()
         manager.delete_all()
-        return {"status": "cleared", "message": "All vectors deleted from index"}
+        return {"status": "cleared", "message": "All vectors deleted"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
