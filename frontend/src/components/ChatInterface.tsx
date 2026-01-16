@@ -1,11 +1,14 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Trash2, Sparkles, Menu } from 'lucide-react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { Send, Loader2, Trash2, Sparkles, Menu, Keyboard } from 'lucide-react';
 import { Message } from '@/types';
 import { sendMessage, clearHistory } from '@/lib/api';
 import MessageBubble from './MessageBubble';
 import Toast, { ToastType } from './Toast';
+import ScrollToBottom from './ScrollToBottom';
+import KeyboardShortcuts from './KeyboardShortcuts';
+import { useTheme } from './ThemeProvider';
 
 interface ChatInterfaceProps {
   onMenuClick?: () => void;
@@ -16,24 +19,70 @@ export default function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: ToastType } | null>(null);
+  const [showScrollButton, setShowScrollButton] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const { darkMode } = useTheme();
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  // Colors based on dark mode
+  const bgMain = darkMode ? '#0f172a' : '#f9fafb'; // slate-900 or gray-50
+  const bgHeader = darkMode ? '#1e293b' : '#ffffff'; // slate-800 or white
+  const borderColor = darkMode ? '#475569' : '#e5e7eb'; // slate-600 or gray-200
+  const textPrimary = darkMode ? '#f1f5f9' : '#1f2937'; // slate-100 or gray-800
+  const textSecondary = darkMode ? '#94a3b8' : '#6b7280'; // slate-400 or gray-500
+  const inputBg = darkMode ? '#334155' : '#ffffff'; // slate-700 or white
+  const inputBorder = darkMode ? '#64748b' : '#d1d5db'; // slate-500 or gray-300
+  const cardBg = darkMode ? '#1e293b' : '#ffffff'; // slate-800 or white
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    if (messagesContainerRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = messagesContainerRef.current;
+      const isNearBottom = scrollHeight - scrollTop - clientHeight < 100;
+      setShowScrollButton(!isNearBottom && messages.length > 0);
+    }
+  }, [messages.length]);
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [messages, scrollToBottom]);
 
-  // Auto-resize textarea
   useEffect(() => {
     if (inputRef.current) {
       inputRef.current.style.height = 'auto';
       inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 150) + 'px';
     }
   }, [input]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key === 'k') {
+        e.preventDefault();
+        handleClearChat();
+      }
+      if (e.ctrlKey && e.key === '/') {
+        e.preventDefault();
+        setShowShortcuts(true);
+      }
+      if (e.key === 'Escape') {
+        setShowShortcuts(false);
+      }
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (document.activeElement !== inputRef.current) {
+          inputRef.current?.focus();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const handleSend = async () => {
     if (!input.trim() || loading) return;
@@ -48,6 +97,10 @@ export default function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
     setMessages((prev) => [...prev, userMessage]);
     setInput('');
     setLoading(true);
+
+    if (inputRef.current) {
+      inputRef.current.style.height = 'auto';
+    }
 
     try {
       const response = await sendMessage(userMessage.content);
@@ -79,6 +132,7 @@ export default function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setLoading(false);
+      inputRef.current?.focus();
     }
   };
 
@@ -111,45 +165,63 @@ export default function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
   ];
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-gray-50">
+    <div className="flex-1 flex flex-col h-full relative" style={{ backgroundColor: bgMain }}>
       {/* Chat Header */}
-      <div className="flex items-center justify-between px-4 md:px-6 py-4 bg-white border-b border-gray-200 shadow-sm">
+      <div 
+        className="flex items-center justify-between px-4 md:px-6 py-4 shadow-sm"
+        style={{ backgroundColor: bgHeader, borderBottom: `1px solid ${borderColor}` }}
+      >
         <div className="flex items-center gap-3">
           <button
             onClick={onMenuClick}
-            className="p-2 hover:bg-gray-100 rounded-lg md:hidden"
+            className="p-2 rounded-lg md:hidden transition-colors hover:bg-gray-100 dark:hover:bg-slate-700"
           >
-            <Menu className="w-5 h-5 text-gray-600" />
+            <Menu className="w-5 h-5" style={{ color: textSecondary }} />
           </button>
           <div>
-            <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+            <h2 className="text-lg font-semibold flex items-center gap-2" style={{ color: textPrimary }}>
               <Sparkles className="w-5 h-5 text-purple-500" />
               Chat
             </h2>
-            <p className="text-sm text-gray-500 hidden sm:block">Ask questions about your documents</p>
+            <p className="text-sm hidden sm:block" style={{ color: textSecondary }}>Ask questions about your documents</p>
           </div>
         </div>
-        <button
-          onClick={handleClearChat}
-          disabled={messages.length === 0}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <Trash2 className="w-4 h-4" />
-          <span className="hidden sm:inline">Clear</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowShortcuts(true)}
+            className="p-2 rounded-lg transition-colors hidden sm:block hover:bg-gray-100 dark:hover:bg-slate-700"
+            title="Keyboard shortcuts (Ctrl+/)"
+          >
+            <Keyboard className="w-5 h-5" style={{ color: textSecondary }} />
+          </button>
+          <button
+            onClick={handleClearChat}
+            disabled={messages.length === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed hover:bg-red-50 dark:hover:bg-red-900/30"
+            style={{ color: textSecondary }}
+            title="Clear chat (Ctrl+K)"
+          >
+            <Trash2 className="w-4 h-4" />
+            <span className="hidden sm:inline">Clear</span>
+          </button>
+        </div>
       </div>
 
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6">
+      <div 
+        ref={messagesContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6"
+      >
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center px-4">
             <div className="w-16 h-16 bg-gradient-to-br from-purple-500 to-blue-500 rounded-2xl flex items-center justify-center mb-4 shadow-lg">
               <Sparkles className="w-8 h-8 text-white" />
             </div>
-            <h3 className="text-xl font-semibold text-gray-800 mb-2">
+            <h3 className="text-xl font-semibold mb-2" style={{ color: textPrimary }}>
               AI Knowledge Assistant
             </h3>
-            <p className="text-gray-500 max-w-md mb-6">
+            <p className="max-w-md mb-6" style={{ color: textSecondary }}>
               Upload documents to your knowledge base, then ask questions. 
               I can search your documents, browse the web, and do calculations!
             </p>
@@ -158,17 +230,25 @@ export default function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
                 <button
                   key={suggestion.text}
                   onClick={() => setInput(suggestion.text)}
-                  className="flex items-center gap-2 px-4 py-3 text-sm bg-white hover:bg-gray-50 border border-gray-200 rounded-xl text-gray-700 transition-all hover:shadow-sm hover:border-gray-300 text-left"
+                  className="flex items-center gap-2 px-4 py-3 text-sm rounded-xl transition-all hover:shadow-sm text-left"
+                  style={{ 
+                    backgroundColor: cardBg, 
+                    border: `1px solid ${borderColor}`,
+                    color: textPrimary,
+                  }}
                 >
                   <span>{suggestion.icon}</span>
                   <span className="truncate">{suggestion.text}</span>
                 </button>
               ))}
             </div>
+            <p className="text-xs mt-6" style={{ color: textSecondary }}>
+              Press <kbd className="px-1.5 py-0.5 rounded text-xs" style={{ backgroundColor: darkMode ? '#334155' : '#e5e7eb' }}>Ctrl</kbd> + <kbd className="px-1.5 py-0.5 rounded text-xs" style={{ backgroundColor: darkMode ? '#334155' : '#e5e7eb' }}>/</kbd> for keyboard shortcuts
+            </p>
           </div>
         ) : (
           messages.map((message) => (
-            <MessageBubble key={message.id} message={message} />
+            <MessageBubble key={message.id} message={message} darkMode={darkMode} />
           ))
         )}
 
@@ -177,8 +257,11 @@ export default function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
             <div className="w-9 h-9 bg-gradient-to-br from-purple-500 to-purple-600 rounded-full flex items-center justify-center shadow-sm">
               <Loader2 className="w-5 h-5 text-white animate-spin" />
             </div>
-            <div className="bg-white rounded-2xl rounded-bl-md px-4 py-3 shadow-sm border border-gray-100">
-              <div className="flex items-center gap-2 text-gray-500">
+            <div 
+              className="rounded-2xl rounded-bl-md px-4 py-3 shadow-sm"
+              style={{ backgroundColor: cardBg, border: `1px solid ${borderColor}` }}
+            >
+              <div className="flex items-center gap-2" style={{ color: textSecondary }}>
                 <span className="animate-pulse-soft">Thinking</span>
                 <span className="flex gap-1">
                   <span className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
@@ -193,8 +276,15 @@ export default function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
         <div ref={messagesEndRef} />
       </div>
 
+      {/* Scroll to bottom button */}
+      <ScrollToBottom 
+        visible={showScrollButton} 
+        onClick={() => scrollToBottom('smooth')}
+        darkMode={darkMode}
+      />
+
       {/* Input Area */}
-      <div className="p-4 bg-white border-t border-gray-200">
+      <div className="p-4" style={{ backgroundColor: bgHeader, borderTop: `1px solid ${borderColor}` }}>
         <div className="flex items-end gap-3 max-w-4xl mx-auto">
           <div className="flex-1 relative">
             <textarea
@@ -204,14 +294,19 @@ export default function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
               onKeyPress={handleKeyPress}
               placeholder="Ask me anything..."
               rows={1}
-              className="w-full resize-none rounded-xl border border-gray-300 px-4 py-3 pr-12 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-shadow"
-              style={{ maxHeight: '150px' }}
+              className="w-full resize-none rounded-xl px-4 py-3 pr-12 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-shadow"
+              style={{ 
+                maxHeight: '150px',
+                backgroundColor: inputBg,
+                border: `1px solid ${inputBorder}`,
+                color: textPrimary,
+              }}
             />
           </div>
           <button
             onClick={handleSend}
             disabled={!input.trim() || loading}
-            className="p-3 bg-gradient-to-r from-purple-500 to-blue-500 text-white rounded-xl hover:from-purple-600 hover:to-blue-600 disabled:from-gray-300 disabled:to-gray-300 disabled:cursor-not-allowed transition-all shadow-sm hover:shadow-md disabled:shadow-none"
+            className="p-3 bg-gradient-to-r from-purple-500 to-blue-500 text-white rounded-xl hover:from-purple-600 hover:to-blue-600 disabled:from-gray-400 disabled:to-gray-400 disabled:cursor-not-allowed transition-all shadow-sm hover:shadow-md disabled:shadow-none"
           >
             {loading ? (
               <Loader2 className="w-5 h-5 animate-spin" />
@@ -220,8 +315,8 @@ export default function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
             )}
           </button>
         </div>
-        <p className="text-xs text-gray-400 text-center mt-2">
-          Press Enter to send, Shift+Enter for new line
+        <p className="text-xs text-center mt-2" style={{ color: textSecondary }}>
+          Press <kbd className="px-1 py-0.5 rounded text-xs" style={{ backgroundColor: darkMode ? '#334155' : '#f3f4f6' }}>Enter</kbd> to send, <kbd className="px-1 py-0.5 rounded text-xs" style={{ backgroundColor: darkMode ? '#334155' : '#f3f4f6' }}>Shift+Enter</kbd> for new line
         </p>
       </div>
 
@@ -233,6 +328,13 @@ export default function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
           onClose={() => setToast(null)}
         />
       )}
+
+      {/* Keyboard Shortcuts Modal */}
+      <KeyboardShortcuts 
+        isOpen={showShortcuts} 
+        onClose={() => setShowShortcuts(false)}
+        darkMode={darkMode}
+      />
     </div>
   );
 }

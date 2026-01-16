@@ -31,9 +31,9 @@ export default function Toast({ message, type, onClose, duration = 4000 }: Toast
   };
 
   const bgColors = {
-    success: 'bg-green-50 border-green-200',
-    error: 'bg-red-50 border-red-200',
-    info: 'bg-blue-50 border-blue-200',
+    success: 'bg-green-50 dark:bg-green-900/50 border-green-200 dark:border-green-700',
+    error: 'bg-red-50 dark:bg-red-900/50 border-red-200 dark:border-red-700',
+    info: 'bg-blue-50 dark:bg-blue-900/50 border-blue-200 dark:border-blue-700',
   };
 
   return (
@@ -43,15 +43,15 @@ export default function Toast({ message, type, onClose, duration = 4000 }: Toast
       } ${isVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'}`}
     >
       {icons[type]}
-      <span className="text-sm text-gray-700">{message}</span>
+      <span className="text-sm text-gray-700 dark:text-slate-100">{message}</span>
       <button
         onClick={() => {
           setIsVisible(false);
           setTimeout(onClose, 300);
         }}
-        className="p-1 hover:bg-gray-200 rounded"
+        className="p-1 hover:bg-gray-200 dark:hover:bg-slate-600 rounded transition-colors"
       >
-        <X className="w-4 h-4 text-gray-500" />
+        <X className="w-4 h-4 text-gray-500 dark:text-slate-300" />
       </button>
     </div>
   );
