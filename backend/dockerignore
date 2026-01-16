@@ -1,0 +1,44 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environment files (secrets - set via Railway)
+.env
+.env.local
+.env.example
+
+# Test files
+test_*.py
+tests/
+pytest_cache/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Uploads (will be created at runtime)
+uploads/*
+!uploads/.gitkeep
+
+# Misc
+*.log
+*.tmp
+Untitled
